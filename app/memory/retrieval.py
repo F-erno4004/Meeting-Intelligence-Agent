@@ -4,9 +4,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.ingestion.embeddings import OpenAIEmbeddingGenerator
+from app.memory.embedding_space import require_embedding_space
 from app.memory.models import Meeting, TranscriptChunk
 
 
@@ -37,10 +38,8 @@ def retrieve_relevant_chunks(
     if top_k < 1:
         raise ValueError("top_k must be at least 1.")
 
-    generator = (
-        embedding_generator
-        or OpenAIEmbeddingGenerator()
-    )
+    generator = embedding_generator or OpenAIEmbeddingGenerator()
+    require_embedding_space(db, generator)
 
     query_vectors = generator.embed_texts(
         [query],
@@ -57,6 +56,15 @@ def retrieve_relevant_chunks(
     distance_expression = (
         TranscriptChunk.embedding.cosine_distance(query_vector)
     )
+    pending_chunk = aliased(TranscriptChunk)
+    incomplete = (
+        select(pending_chunk.id)
+        .where(
+            pending_chunk.meeting_id == Meeting.id,
+            pending_chunk.embedding.is_(None),
+        )
+        .exists()
+    )
 
     statement = (
         select(
@@ -69,7 +77,8 @@ def retrieve_relevant_chunks(
             TranscriptChunk.meeting_id == Meeting.id,
         )
         .where(
-            TranscriptChunk.embedding.is_not(None)
+            TranscriptChunk.embedding.is_not(None),
+            ~incomplete,
         )
         .order_by(distance_expression)
         .limit(top_k)

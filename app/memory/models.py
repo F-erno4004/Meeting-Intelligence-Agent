@@ -9,6 +9,8 @@ from sqlalchemy.dialects.postgresql import TSVECTOR
 
 from app.memory.database import Base
 
+EMBEDDING_DIMENSIONS = 1536
+
 
 # =====================================================
 # 1. MEETINGS
@@ -127,9 +129,8 @@ class TranscriptChunk(Base):
         nullable=True,
     )
 
-    # text-embedding-3-small default dimensions = 1536
     embedding: Mapped[Optional[list[float]]] = mapped_column(
-        Vector(1536),
+        Vector(EMBEDDING_DIMENSIONS),
         nullable=True,
     )
 
@@ -188,6 +189,18 @@ class TranscriptChunk(Base):
             postgresql_using="gin",
         ),
     )
+
+
+class EmbeddingSpace(Base):
+    """The model and vector transformation shared by all transcript embeddings."""
+
+    __tablename__ = "embedding_space"
+    __table_args__ = (CheckConstraint("id = 1", name="ck_embedding_space_singleton"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
+    transformation: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 # =====================================================

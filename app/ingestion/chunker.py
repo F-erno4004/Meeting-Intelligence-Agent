@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import tiktoken
 
-from .parser import ParsedTranscript, TranscriptTurn
+from .parser import ParsedTranscript
 
 
 @dataclass(frozen=True)
@@ -17,19 +17,21 @@ class TranscriptChunkData:
     token_count: int
 
 
-def _encoding_for_model(model: str):
-    try:
-        return tiktoken.encoding_for_model(model)
-    except KeyError:
-        # text-embedding-3-small uses the cl100k_base tokenizer.
-        return tiktoken.get_encoding("cl100k_base")
+def _encoding_for_model(model: str | None):
+    if model:
+        try:
+            return tiktoken.encoding_for_model(model)
+        except KeyError:
+            pass
+    # Keep the same token-count estimate and chunk boundaries across runs.
+    return tiktoken.get_encoding("cl100k_base")
 
 
 def chunk_transcript(
     transcript: ParsedTranscript,
     max_tokens: int = 550,
     overlap_turns: int = 1,
-    tokenizer_model: str = "text-embedding-3-small",
+    tokenizer_model: str | None = None,
 ) -> list[TranscriptChunkData]:
     """
     Group complete transcript turns into token-bounded chunks.

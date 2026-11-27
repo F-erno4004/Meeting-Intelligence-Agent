@@ -1,103 +1,48 @@
 from __future__ import annotations
 
+import logging
 import os
-from pathlib import Path
 
-from dotenv import load_dotenv
+from app.ingestion.embeddings import OpenAIEmbeddingGenerator
+from app.ingestion.service import iter_ingestion_results, transcript_paths
+from app.memory.database import PROJECT_ROOT, SessionLocal
+from app.memory.embedding_space import EmbeddingSpaceError, require_embedding_space
 
 
 def main() -> None:
-    project_root = Path(__file__).resolve().parents[2]
-    env_file = project_root / ".env"
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    paths = transcript_paths(PROJECT_ROOT / os.getenv("TRANSCRIPT_DIR", "data/transcripts"))
+    generator = OpenAIEmbeddingGenerator()
+    try:
+        with SessionLocal.begin() as db:
+            require_embedding_space(db, generator)
+    except EmbeddingSpaceError as exc:
+        raise SystemExit(str(exc)) from exc
 
-    if not env_file.exists():
-        raise FileNotFoundError(f".env file not found: {env_file}")
+    print(f"Found {len(paths)} transcripts in {paths[0].parent}", flush=True)
+    print(f"Embedding model {generator.model} | {generator.dimensions} dimensions | "
+          f"batch size {generator.batch_size}", flush=True)
 
-    load_dotenv(dotenv_path=env_file, override=True)
-
-    required_vars = [
-        "OPENAI_API_KEY",
-        "LLM_BASE_URL",
-        "DATABASE_URL",
-        "EMBEDDING_MODEL",
-        "EMBEDDING_DIMENSIONS",
-    ]
-
-    for variable in required_vars:
-        if not os.getenv(variable):
-            raise RuntimeError(f"{variable} is missing or empty in .env")
-
-    # Import application modules only after loading .env.
-    from app.ingestion.embeddings import OpenAIEmbeddingGenerator
-    from app.ingestion.service import ingest_transcript_directory
-    from app.ingestion.service import ingest_transcript_file
-    from app.memory.database import SessionLocal
-
-    transcript_dir = Path(
-        os.getenv("TRANSCRIPT_DIR", "data/transcripts")
-    )
-
-    if not transcript_dir.is_absolute():
-        transcript_dir = project_root / transcript_dir
-
-    generator = OpenAIEmbeddingGenerator(
-        model=os.getenv("EMBEDDING_MODEL"),
-        batch_size=int(os.getenv("EMBEDDING_BATCH_SIZE", "8")),
-    )
-
-    print("Environment file:", env_file)
-    print("Embedding model:", generator.model)
-    print("Embedding dimensions:", generator.dimensions)
-    print("Embedding API URL:", os.getenv("LLM_BASE_URL"))
-
-    previously_ingested = {"ES2002a.txt"}
-
-    transcript_files = sorted(
-        path
-        for path in transcript_dir.glob("*.txt")
-        if path.name not in previously_ingested
-    )
-
-    results = []
-
-    for transcript_file in transcript_files:
-        with SessionLocal() as db:
-            result = ingest_transcript_file(
-                transcript_file,
-                db,
-                embedding_generator=generator,
-                max_chunk_tokens=int(os.getenv("CHUNK_MAX_TOKENS", "550")),
-                overlap_turns=int(os.getenv("CHUNK_OVERLAP_TURNS", "1")),
-            )
-
-        results.append(result)
-
-    print("\nINGESTION REPORT")
-    print("=" * 72)
-
-    for result in results:
-        print(
-            f"{result.status.upper():9} "
-            f"{result.source_filename:24} "
-            f"meeting={result.meeting_id or '-':12} "
-            f"chunks={result.chunk_count:4} "
-            f"words={result.word_count:7} "
-            f"{result.message or ''}"
+    counts = {"ingested": 0, "duplicate": 0, "error": 0}
+    for index, result in enumerate(iter_ingestion_results(paths, SessionLocal, generator), start=1):
+        counts[result.status] += 1
+        meeting_details = (
+            f"{result.meeting_id} | {result.chunk_count} chunks | " if result.meeting_id else ""
         )
+        print(
+            f"[{index}/{len(paths)}] {result.source_filename} | {result.status.upper()} | "
+            f"{meeting_details}{result.message}",
+            flush=True,
+        )
+        if result.stopped:
+            print("Ingestion stopped. Committed batches are saved for the next run.", flush=True)
 
-    ingested = sum(item.status == "ingested" for item in results)
-    duplicates = sum(item.status == "duplicate" for item in results)
-    errors = sum(item.status == "error" for item in results)
-
-    print("-" * 72)
+    processed = sum(counts.values())
     print(
-        f"Total files: {len(results)} | "
-        f"Ingested: {ingested} | "
-        f"Duplicates: {duplicates} | "
-        f"Errors: {errors}"
+        f"Processed {processed}/{len(paths)} | Ingested {counts['ingested']} | "
+        f"Duplicates {counts['duplicate']} | Errors {counts['error']}"
     )
-
-    if errors:
+    if counts["error"]:
         raise SystemExit(1)
 
 
